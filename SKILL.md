@@ -145,6 +145,8 @@ These are the ones worth memorizing — each is a real, reproducible surprise (a
 
 7. **Boolean ops on undefined are inconsistent** — combine `or`/`and` with possibly-missing operands only after `$exists`-guarding them.
 
+8. **Copy-paste typography breaks real expressions.** Smart quotes (`“ ”`), curly apostrophes (`’`), and invisible pasted characters are not JSONata syntax. If an expression looks right but the parser complains near a string, retype the quotes as plain ASCII and test the smallest expression first.
+
 ---
 
 ## Function cheat-sheet (grounded in the vendored engine)
@@ -181,6 +183,87 @@ Given `{"orders":[{"items":[{"p":10,"q":2},{"p":5,"q":4}]},{"items":[{"p":3,"q":
 
 ---
 
+## Advanced composition patterns
+
+Use these when a one-line path stops being honest. They are compact, but each one combines several core ideas.
+
+### Recursive flatten: blocks + recursion + `$each` + `~> $merge`
+
+Given nested JSON, produce one flat object with dotted keys:
+
+```
+(
+  $flatten := function($o, $prefix) {
+    $each($o, function($v, $k) {(
+      $name := $prefix ? $prefix & '.' & $k : $k;
+      $type($v) = 'object' ? $flatten($v, $name) : { $name: $v }
+    )}) ~> $merge()
+  };
+  $flatten($, '')
+)
+```
+
+On `{"customer":{"name":"Ada","address":{"city":"London","zip":"SW1"}},"active":true}`:
+
+```
+{
+  "customer.name": "Ada",
+  "customer.address.city": "London",
+  "customer.address.zip": "SW1",
+  "active": true
+}
+```
+
+Read it in layers: `$each` walks an object, the block binds the dotted name, the ternary recurses only for object values, each leaf returns a one-entry object, and `~> $merge()` combines the array of one-entry objects into one object.
+
+### Group, then reshape
+
+Object constructors can group a sequence by a computed key. Then `$each` can turn the grouped object back into an array:
+
+```
+(
+  $groups := orders{date: sku[]};
+  $each($groups, function($skus, $date) {
+    { 'date': $date, 'skus': [$skus] }
+  })
+)
+```
+
+On three orders with two dates this returns:
+
+```
+[
+  { "date": "2026-07-01", "skus": ["A", "B"] },
+  { "date": "2026-07-02", "skus": ["C"] }
+]
+```
+
+The `sku[]` and `[$skus]` are intentional shape protection: a date with one SKU should still produce a `skus` array.
+
+---
+
+## Parse errors: read the punctuation
+
+JSONata parse errors are often terse, but the fix is usually in the punctuation.
+
+- **`Expected "}" got ":"` or similar inside a callback** usually means you are building an object in a place where the parser did not see a complete object expression. Reduce the callback to one returned object, then add fields back one at a time.
+- **`Expected "}" got ";"`** usually means you put block statements where an object constructor was expected, or you forgot that semicolons belong inside `( ... )` blocks.
+- **`{ ... }` constructs an object.** It expects key/value pairs: `{ 'name': value }`.
+- **`( ... )` creates a grouped expression or block.** It may contain `:=` bindings and `;` separators: `( $x := 1; $x + 1 )`.
+- **Quote non-identifier object keys.** Keys like `"8"`, `"field-id"`, or `"Over 18 ?"` must be quoted or backticked in the right context.
+
+Safe callback pattern:
+
+```
+$map(fields, function($f) {
+  { '8': { 'value': $f.value } }
+})
+```
+
+When stuck, do not keep editing the full expression. Test the smallest syntactic unit: first the object literal, then the callback, then the `$map`.
+
+---
+
 ## In an actions.json map specifically
 
 Map workflows and state projections embed JSONata in **whole-string `{% ... %}` slots** (a `repeat`, an `output`, a projection `expression`). Constraints that matter there:
@@ -190,6 +273,19 @@ Map workflows and state projections embed JSONata in **whole-string `{% ... %}` 
 - **`$exists` on every optional `steps.*.output.*`** — a step may not have run, and (gotcha #2) `= null` won't catch it.
 - **Preserve arrays** in projections with `$append([], $map(...))` and guard empties with `$count(x) > 0 ? ... : []`, so a one-item page doesn't collapse your list to a scalar.
 - The authoring skill `write-actions-json` covers the surrounding contract (steps, `when`, `retry_until`); this skill covers the expression language inside those slots.
+
+---
+
+## Host boundaries: JSONata plus local rules
+
+Many products embed JSONata but add their own root variables, delimiters, functions, or restrictions. First separate **vanilla JSONata** from **host contract**.
+
+- **actions.json maps:** whole-string `{% ... %}` slots with injected `input`, `steps.<id>.output`, and loop `item`/`index`.
+- **AWS Step Functions:** expressions are also delimited with `{% ... %}`, but data comes through `$states.input`, `$states.result`, and related host variables. A JSONPath habit like `$.foo` is usually the wrong mental model there.
+- **Node-RED:** JSONata may include host functions such as `$flowContext()` and `$globalContext()`. Those are not portable vanilla JSONata.
+- **Stedi, Truto, Kestra, and other mapping products:** check the platform's root object and custom functions before copying examples across hosts.
+
+Debug host issues in two passes: first prove the expression in a vanilla JSONata engine with an equivalent input object; then add the host-specific variables or delimiters back.
 
 ---
 
@@ -207,4 +303,4 @@ The fastest way to be right is to evaluate the expression against sample input b
   ```
   Feed it the real fixture (the paragraph text, the extracted DOM records, the `input` shape) and check the output shape, not just that it ran. A parse error means the *syntax* is wrong (usually a block/`;`/paren issue — Stage 5); a wrong-but-valid result means the *sequence logic* is wrong (usually gotcha #1 or #2).
 
-**Sources:** JSONata official docs — [processing model](https://docs.jsonata.org/processing), [path operators](https://docs.jsonata.org/path-operators), [predicates](https://docs.jsonata.org/predicate), [programming constructs](https://docs.jsonata.org/programming), [higher-order functions](https://docs.jsonata.org/higher-order-functions), and the [official tutorial](https://github.com/jsonata-js/jsonata/blob/master/tutorial.md). All examples verified against `extensions/chrome-overlay-runtime/src/agent/vendor/jsonata.mjs`.
+**Sources:** JSONata official docs — [processing model](https://docs.jsonata.org/processing), [path operators](https://docs.jsonata.org/path-operators), [predicates](https://docs.jsonata.org/predicate), [programming constructs](https://docs.jsonata.org/programming), [higher-order functions](https://docs.jsonata.org/higher-order-functions), and the [official tutorial](https://github.com/jsonata-js/jsonata/blob/master/tutorial.md). Additional teaching examples were cross-checked from community war stories and worked transforms: [recursive flatten](https://stackoverflow.com/questions/60817650/how-to-flatten-nested-object-to-single-depth-object-with-jsonata), [group values](https://stackoverflow.com/questions/50697006/group-values-in-jsonata), [Step Functions singleton array shape](https://stackoverflow.com/questions/79291760/step-functions-jsonata-mapiterator-bug), [Step Functions host variables](https://stackoverflow.com/questions/79304259/how-do-i-evaluate-jsonata-expression-in-key-in-json), and Node-RED/Home Assistant parse-error threads. All examples verified against `extensions/chrome-overlay-runtime/src/agent/vendor/jsonata.mjs`.
